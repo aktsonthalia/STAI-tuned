@@ -1495,8 +1495,15 @@ class GdriveClient:
     @retrier_factory_with_auto_logger()
     def _create_client(self):
 
-        gauth, _ = make_google_auth(self.credentials)
-        return GoogleDrive(gauth)
+        settings = {
+            "client_config_backend": "service",
+            "service_config": {
+                "client_json_file_path": SERVICE_ACCOUNT_CREDENTIALS_PATH,
+            }
+        }
+        gauth = GoogleAuth(settings=settings)
+        gauth.ServiceAuth()
+        return GdriveClient(gauth)
 
     def get_node_by_id(self, node_id):
         return self.client.CreateFile({'id': node_id})
