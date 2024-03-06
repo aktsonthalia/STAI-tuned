@@ -18,6 +18,9 @@ from typing import (
     List,
     Callable
 )
+from collections import UserDict
+import warnings
+import gc
 
 
 # local modules
@@ -31,6 +34,7 @@ from utility.utils import (
     compute_file_hash,
     get_hash,
     log_or_print,
+    error_or_print,
     get_project_root_path,
     prepare_for_pickling,
     randomly_subsample_indices_uniformly,
@@ -40,7 +44,8 @@ from utility.utils import (
     compute_proportion,
     add_custom_properties,
     raise_unknown,
-    get_with_assert
+    get_with_assert,
+    load_from_pickle
 )
 from utility.imports import (
     FROM_CLASS_KEY,
@@ -62,6 +67,12 @@ H5_EXTENSION = ".h5"
 
 TRAIN_KEY = "train"
 VAL_KEY = "val"
+
+
+SCALING_FACTOR = 255
+
+
+FINGERPRINT_ATTR = "_object_fingerprint_for_reading_from_cache"
 
 
 class DatasetWrapperWithTransforms(torch.utils.data.Dataset):
@@ -96,7 +107,7 @@ def fetch_data(
     dataset_path,
     assert_folder_func,
     do_fetch_data_func,
-    logger=make_logger(),
+    logger=None,
     dataset_path_is_folder=True
 ):
     """
@@ -106,15 +117,18 @@ def fetch_data(
         os.path.basename(dataset_path),
         must_have_extension=False
     )
-    logger.log(
-        "Verifying \"{}\" dataset..".format(dataset_name)
+    log_or_print(
+        "Verifying \"{}\" dataset..".format(dataset_name),
+        logger=logger,
+        auto_newline=True
     )
     if not assert_folder_func(dataset_path):
-        logger.log(
+        log_or_print(
             "Could not verify \"{}\" dataset in {}".format(
                 dataset_name,
                 dataset_path
             ),
+            logger=logger,
             auto_newline=True
         )
         if os.path.exists(dataset_path):
@@ -122,11 +136,13 @@ def fetch_data(
                 = "folder" \
                     if dataset_path_is_folder \
                     else "file"
-            logger.log(
+            log_or_print(
                 "Removing existing {} {}..".format(
                     object_type,
                     dataset_path
-                )
+                ),
+                logger=logger,
+                auto_newline=True
             )
             remove_file_or_folder(dataset_path)
         os.makedirs(
@@ -140,12 +156,13 @@ def fetch_data(
             dataset_path,
             logger=logger
         )
-        logger.log(
+        log_or_print(
             "Verifying \"{}\" dataset "
             "downloaded into {}..".format(
                 dataset_name,
                 dataset_path
             ),
+            logger=logger,
             auto_newline=True
         )
         if not assert_folder_func(dataset_path):
@@ -153,11 +170,12 @@ def fetch_data(
                 "Downloaded data is not what was expected."
             )
     else:
-        logger.log(
+        log_or_print(
             "\"{}\" is already in {}!".format(
                 dataset_name,
                 dataset_path
             ),
+            logger=logger,
             auto_newline=True
         )
 
@@ -191,11 +209,12 @@ def do_fetch_dataset_as_file(url):
     ):
         if url == EMPTY_URL:
             NotImplementedError()
-        logger.log(
+        log_or_print(
             "Downloading \"{}\" into {}..".format(
                 dataset_name,
                 dataset_path
             ),
+            logger=logger,
             auto_newline=True
         )
         download_file_by_link(url, dataset_path)
@@ -236,14 +255,14 @@ def download_file_by_yadisk_link(sharing_link, filename):
         )
 
 
-def assert_dataset_as_file(file_hash):
+def assert_dataset_as_file(file_hash, check_file_hash=CHECK_FILE_HASH):
 
     def assert_file_by_hash(dataset_path):
 
         path_exists = os.path.exists(dataset_path)
 
         file_hash_is_correct = True
-        if path_exists and CHECK_FILE_HASH:
+        if path_exists and check_file_hash:
             file_hash_is_correct \
                 = (compute_file_hash(dataset_path) == file_hash)
 
@@ -349,7 +368,13 @@ def get_dataloader_init_args_from_existing_dataloader(
 
 
 def default_pickle_load(path):
-    return pickle.load(open(path, "rb"))
+    return load_from_pickle(path)
+
+
+def default_pickle_save(obj, path):
+    prepare_for_pickling(obj)
+    with open(path, "wb") as f:
+        pickle.dump(obj, f)
 
 
 def make_or_load_from_cache(
@@ -357,47 +382,77 @@ def make_or_load_from_cache(
     object_config,
     make_func,
     load_func=default_pickle_load,
+    save_func=default_pickle_save,
     cache_path=make_default_cache_path(),
     forward_cache_path=False,
-    logger=make_logger(),
-    unique_hash=None
+    logger=None,
+    unique_hash=None,
+    verbose=False,
+    check_gc=False
 ):
+
+    def update_object_fingerprint_attr(result, object_fingerprint):
+
+        if isinstance(result, dict):
+            result = UserDict(result)
+
+        setattr(result, FINGERPRINT_ATTR, object_fingerprint)
+        return result
+
+    if unique_hash is None:
+        unique_hash = get_hash(object_config)
+
+    object_fingerprint = "{}_{}".format(object_name, unique_hash)
+
+    if check_gc:
+        objects_with_the_same_fingerprint = extract_from_gc_by_attribute(
+            FINGERPRINT_ATTR,
+            object_fingerprint
+        )
+
+        if len(objects_with_the_same_fingerprint) > 0:
+            if verbose:
+                log_or_print(
+                    "Reusing object from RAM with fingerprint {}".format(
+                        object_fingerprint
+                    ),
+                    logger=logger
+                )
+            return objects_with_the_same_fingerprint[0]
 
     if cache_path is None:
         cache_fullpath = None
     else:
-        # TODO(Alex | 04.05.2023) keep this after update
-        if unique_hash is None:
-            unique_hash = get_hash(object_config)
         os.makedirs(cache_path, exist_ok=True)
         cache_fullpath = os.path.join(
             cache_path,
-            "{}_{}.pkl".format(
-                object_name,
-                unique_hash
-            )
+            "{}.pkl".format(object_fingerprint)
         )
 
     if cache_fullpath and os.path.exists(cache_fullpath):
-        log_or_print(
-            "Loading cached {} from {}".format(
-                object_name,
-                cache_fullpath
-            ),
-            logger=logger,
-            auto_newline=True
-        )
+        if verbose:
+            log_or_print(
+                "Loading cached {} from {}".format(
+                    object_name,
+                    cache_fullpath
+                ),
+                logger=logger,
+                auto_newline=True
+            )
 
         try:
             result = load_func(cache_fullpath)
-            # TODO(Alex | 22.02.2023) Move to load_func like in UT-TML repo
+            # TODO(Alex | 22.02.2023) Remove this once logger is global
             if hasattr(result, "logger"):
                 result.logger = logger
             return result
         except:
-            logger.error("Could not load object from {}\nReason:\n{}".format(
-                cache_fullpath,
-                traceback.format_exc())
+            error_or_print(
+                "Could not load object from {}\nReason:\n{}".format(
+                    cache_fullpath,
+                    traceback.format_exc()
+                ),
+                logger=logger
             )
 
     if forward_cache_path:
@@ -414,19 +469,18 @@ def make_or_load_from_cache(
 
     if cache_fullpath:
         try:
-            # TODO(Alex | 22.02.2023) Move to save_func like in UT-TML repo
-            prepare_for_pickling(result)
-            pickle.dump(result, open(cache_fullpath, "wb"))
-            log_or_print(
-                "Saved cached {} into {}".format(
-                    object_name,
-                    cache_fullpath
-                ),
-                logger=logger,
-                auto_newline=True
-            )
+            save_func(result, cache_fullpath)
+            if verbose:
+                log_or_print(
+                    "Saved cached {} into {}".format(
+                        object_name,
+                        cache_fullpath
+                    ),
+                    logger=logger,
+                    auto_newline=True
+                )
         except OSError:
-            log_or_print(
+            error_or_print(
                 "Could not save cached {} to {}. "
                 "Reason: \n{} \nContinuing without saving it.".format(
                     object_name,
@@ -436,7 +490,35 @@ def make_or_load_from_cache(
                 logger=logger,
                 auto_newline=True
             )
+
+    if check_gc:
+        result = update_object_fingerprint_attr(result, object_fingerprint)
+
     return result
+
+
+def extract_from_gc_by_attribute(attribute_name, attribute_value):
+
+    res = []
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+
+        for obj in gc.get_objects():
+            has_attribute = False
+
+            try:
+                has_attribute = hasattr(obj, attribute_name)
+            except:
+                continue
+
+            if (
+                has_attribute
+                    and (getattr(obj, attribute_name) == attribute_value)
+            ):
+                res.append(obj)
+
+    return res
 
 
 class SingleDataloaderWrapper:
@@ -500,16 +582,18 @@ def get_generic_train_eval_dataloaders(
     train_batch_size,
     eval_batch_size,
     shuffle_train=True,
-    shuffle_eval=False
+    shuffle_eval=False,
+    **dataloader_kwargs
 ):
 
-    def add_dataloaders(datasets_dict, batch_size, shuffle):
+    def add_dataloaders(datasets_dict, batch_size, shuffle, **dataloader_kwargs):
         dataloaders_dict = {}
         for dataset_name, dataset in datasets_dict.items():
             dataloaders_dict[dataset_name] = DataLoader(
                 dataset,
                 shuffle=shuffle,
-                batch_size=batch_size
+                batch_size=batch_size,
+                **dataloader_kwargs
             )
         return dataloaders_dict
 
@@ -520,14 +604,16 @@ def get_generic_train_eval_dataloaders(
         train_dataloaders = add_dataloaders(
             train_datasets_dict,
             train_batch_size,
-            shuffle_train
+            shuffle_train,
+            **dataloader_kwargs
         )
 
     if eval_batch_size > 0:
         eval_dataloaders = add_dataloaders(
             eval_datasets_dict,
             eval_batch_size,
-            shuffle_eval
+            shuffle_eval,
+            **dataloader_kwargs
         )
 
     return train_dataloaders, eval_dataloaders
@@ -714,3 +800,71 @@ def make_sampler(data_source, sampler_config):
         return make_from_class_ctor(specific_sampler_config, [data_source])
     else:
         raise_unknown("sampler type", sampler_type, "sampler config")
+
+
+def get_base_dataset(
+    base_data_config,
+    dataset_filename,
+    get_dataset_hash,
+    get_dataset_url,
+    read_dataset,
+    check_file_hash=CHECK_FILE_HASH,
+    logger=None
+):
+
+    assert '.' in dataset_filename
+    dataset_name, _ = dataset_filename.split('.')
+
+    log_or_print(f"Making base_data for {dataset_name}..", logger=logger)
+    dataset_path = os.path.join(
+        get_with_assert(base_data_config, "path"),
+        dataset_filename
+    )
+    fetch_data(
+        dataset_path=dataset_path,
+        assert_folder_func=assert_dataset_as_file(
+            get_dataset_hash(dataset_name),
+            check_file_hash=check_file_hash
+        ),
+        do_fetch_data_func=do_fetch_dataset_as_file(
+            get_dataset_url(dataset_name)
+        ),
+        logger=logger,
+        dataset_path_is_folder=False
+    )
+    dataset = read_dataset(
+        filename=dataset_path
+    )
+
+    return dataset
+
+
+class CachingDatasetWrapper(torch.utils.data.Dataset):
+
+    def __init__(self, dataset, unique_hash, cache_path):
+        self.dataset = dataset
+        self.unique_hash = unique_hash
+        self.cache_path = cache_path
+
+    def __getitem__(self, index):
+
+        def make_item(item_config, logger):
+            return {"item": self.dataset[index]}
+
+        item = make_or_load_from_cache(
+            "dataset_item_{}".format(index),
+            object_config={},
+            unique_hash=self.unique_hash,
+            make_func=make_item,
+            cache_path=self.cache_path,
+            verbose=False
+        )
+
+        return item["item"]
+
+    def __len__(self):
+        return len(self.dataset)
+
+
+def make_caching_dataset(dataset, unique_hash, cache_path):
+    return CachingDatasetWrapper(dataset, unique_hash, cache_path)

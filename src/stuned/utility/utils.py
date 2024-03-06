@@ -82,6 +82,10 @@ PLT_PLOT_HEIGHT = 5
 PLT_PLOT_WIDTH = 5
 
 
+# regexes
+ENV_VAR_RE = re.compile(r"<\$([a-zA-Z0-9-_]+)>")
+
+
 class ChildrenForPicklingPreparer:
 
     def _prepare_for_pickling(self):
@@ -441,6 +445,7 @@ def save_checkpoint(
     )
     for obj in checkpoint.values():
         prepare_for_unpickling(obj)
+    return checkpoint_savepath
 
 
 def prepare_for_pickling(obj):
@@ -1194,11 +1199,18 @@ def read_csv_as_dict_pd(
 
 
 def normalize_string_path(path, current_dir):
+
     if current_dir is None:
         current_dir = get_project_root_path()
     path = os.path.expanduser(path)
     if path[0] == '.':
         path = os.path.join(current_dir, path)
+    env_vars = ENV_VAR_RE.findall(path)
+    for env_var in env_vars:
+        assert env_var in os.environ, \
+            f"Environment variable {env_var} is not set."
+        path = path.replace(f"<${env_var}>", os.environ[env_var])
+
     return os.path.abspath(path)
 
 
@@ -1867,13 +1879,7 @@ def prune_list(l, value):
 
 def get_with_assert(container, key, error_msg=None):
 
-    if isinstance(key, str):
-        if error_msg is None:
-            error_msg = f"Key \"{key}\" not in container: {container}"
-        assert key in container, error_msg
-        return container[key]
-    else:
-        assert isinstance(key, list)
+    if isinstance(key, list):
         assert len(key) > 0
         next_key = key[0]
         rest_key = key[1:]
@@ -1882,6 +1888,11 @@ def get_with_assert(container, key, error_msg=None):
             return next_container
         else:
             return get_with_assert(next_container, rest_key, error_msg)
+    else:
+        if error_msg is None:
+            error_msg = f"Key \"{key}\" not in container: {container}"
+        assert key in container, error_msg
+        return container[key]
 
 
 def properties_diff(first_object, second_object, only_local=True):
@@ -1924,11 +1935,17 @@ def add_custom_properties(giver, taker, only_local=True):
         )
 
 
-def invert_dict(d):
+def invert_dict(d, none_to_string=False):
     res = {}
     for key, container in d.items():
         assert isinstance(container, Iterable)
         for value in container:
+            if none_to_string and value is None:
+                value = "None"
             assert value not in res, f"Dict is not invertible: {d}"
             res[value] = key
     return res
+
+
+def load_from_pickle(path):
+    return pickle.load(open(path, "rb"))
