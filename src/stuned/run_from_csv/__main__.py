@@ -10,6 +10,10 @@ import multiprocessing as mp
 
 # local modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from settings import (
+    NESTED_CONFIG_KEY_SEPARATOR,
+    EMPTY_STRING,
+)
 from utility.utils import (
     DEFAULT_ENV_NAME,
     NEW_SHELL_INIT_COMMAND,
@@ -29,7 +33,6 @@ from utility.utils import (
 )
 from utility.configs import (
     AUTOGEN_PREFIX,
-    NESTED_CONFIG_KEY_SEPARATOR,
     make_csv_config
 )
 from utility.logger import (
@@ -68,7 +71,6 @@ DEFAULT_SLURM_ARGS_DICT = {
     "error": DEV_NULL,
     "output": DEV_NULL
 }
-EMPTY_STRING = "EMPTY_STRING"
 EXPANDED_CSV_PREFIX = "expanded_"
 CURRENT_ROW_PLACEHOLDER = "__ROW__"
 CURRENT_WORKSHEET_PLACEHOLDER = "__WORKSHEET__"
@@ -367,7 +369,6 @@ def process_csv_row(
     final_cmd = None
 
     whether_to_run = csv_row[WHETHER_TO_RUN_COLUMN]
-
     if (
         is_number(whether_to_run)
             and int(whether_to_run) != 0
@@ -531,7 +532,7 @@ def make_new_config(
         list_end_symbol=']'
     )
 
-    deltas["logging/output_csv"] = make_csv_config(
+    deltas[f"logging{NESTED_CONFIG_KEY_SEPARATOR}output_csv"] = make_csv_config(
         input_csv_path,
         row_number,
         spreadsheet_url,

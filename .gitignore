@@ -137,3 +137,10 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# input files
+wandb_links.txt
+
+# output files
+slurm/*
+

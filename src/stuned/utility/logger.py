@@ -101,6 +101,7 @@ RUNNING_STATUS = "Running"
 COMPLETED_STATUS = "Completed"
 FAIL_STATUS = "Fail"
 WHETHER_TO_RUN_COLUMN = "whether_to_run"
+RESULT_COLUMN_PREFIX = "result_"
 
 
 OUTPUT_CSV_KEY = "output_csv"
@@ -151,7 +152,10 @@ BASE_ESTIMATOR_LOG_SUFFIX = "base_estimator"
 
 
 LOGGING_CONFIG_KEY = "logging"
-
+SERVICE_ACCOUNT_CREDENTIALS_PATH = os.path.join(
+    os.environ["HOME"],
+    "config/gauth/credentials.json"
+)
 
 # gspread
 DEFAULT_SPREADSHEET_ROWS = 100
@@ -1004,7 +1008,7 @@ def redneck_logger_context(
             try_to_sync_csv_with_remote(logger)
 
     # close wandb
-    logger.finish_wandb(verbose=True)
+    logger.finish_wandb(verbose=True)        
 
     try_to_log_in_csv_in_batch(
         logger,
@@ -1256,19 +1260,8 @@ class GspreadClient:
     @retrier_factory_with_auto_logger()
     def _create_client(self):
 
-        if os.path.exists(DEFAULT_GOOGLE_SERVICE_CREDENTIALS_PATH):
-            return gspread.service_account(
-                filename=DEFAULT_GOOGLE_SERVICE_CREDENTIALS_PATH
-            )
+        return gspread.service_account(filename=SERVICE_ACCOUNT_CREDENTIALS_PATH)
 
-        _, auth_user_filename = make_google_auth(
-            self.gspread_credentials,
-            logger=self.logger
-        )
-        return gspread.oauth(
-            credentials_filename=self.gspread_credentials,
-            authorized_user_filename=auth_user_filename
-        )
 
     @retrier_factory_with_auto_logger()
     def delete_spreadsheet(
@@ -1482,15 +1475,13 @@ def init_wandb_run(
     settings = None
     if SYSTEM_PLATFORM == "linux":
         settings = wandb.Settings(start_method="fork")
-    wandb_init_kwargs = wandb_config.get("wandb_init_kwargs", {})
-    if PROJECT_KEY not in wandb_init_kwargs:
-        wandb_init_kwargs[PROJECT_KEY] = exp_name
     run = wandb.init(
+        entity=wandb_config["entity"],
+        project=wandb_config["project"],
         dir=wandb_dir,
         settings=settings,
         sync_tensorboard=wandb_config.get("sync_tb", False),
         config=config,
-        **wandb_init_kwargs
     )
     api = wandb.Api(api_key=wandb_password).run(run.path)
     return run, api
@@ -1512,19 +1503,15 @@ class GdriveClient:
     @retrier_factory_with_auto_logger()
     def _create_client(self):
 
-        if os.path.exists(DEFAULT_GOOGLE_SERVICE_CREDENTIALS_PATH):
-            settings = {
-                    "client_config_backend": "service",
-                    "service_config": {
-                        "client_json_file_path":
-                            DEFAULT_GOOGLE_SERVICE_CREDENTIALS_PATH,
-                    }
-                }
-            gauth = GoogleAuth(settings=settings)
-            gauth.ServiceAuth()
-        else:
-            gauth, _ = make_google_auth(self.credentials)
-        return GoogleDrive(gauth)
+        settings = {
+            "client_config_backend": "service",
+            "service_config": {
+                "client_json_file_path": SERVICE_ACCOUNT_CREDENTIALS_PATH,
+            }
+        }
+        gauth = GoogleAuth(settings=settings)
+        gauth.ServiceAuth()
+        return GdriveClient(gauth)
 
     def get_node_by_id(self, node_id):
         return self.client.CreateFile({'id': node_id})
